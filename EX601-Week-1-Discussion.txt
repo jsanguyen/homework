@@ -1,0 +1,38 @@
+
+
+1. The Situation - Option A
+- At my current workplace, the organization is pushing for heavy AI - assisted development. Every engineer is implored to use Copilot for writing code and we have been ramping up on utilizing different skills and MCP servers for business specific needs. 
+- The issue that came and is still something we're considering is the new fact that writing code is no longer the Bottleneck, rather reviewing and testing code.
+- We're getting 5X the amount of PR's to review, and the majority of the code is AI generated. What comes from this is the lack of critical thnking when reviews leave comments asking why X was implemented, does Y actually have valid unit tests, and if Z meets the business requirements for the feature in question. Because the code is AI generatedm the contributor will more often that not not uinderstand fully what the implemntation does, and having the implmentations unit tests also AI generated is another issue that compounds the fact that without thinking through the problem, we're silo-ing the code into a huge black box that not all of us understands. 
+- This leads to massive tech debt and tribal knowledge faults down the road. 
+
+One notable example: A PR implementing changing the way Order values were calculated for missed and late orders arrived with about 20 files changes, 18 new tests and a PR description that was boilerplate(Nothing meaningful included)
+
+I asked the IC what did PR did, screenshots of the UI, logs to prove the backend was working as intended and the IC couldn't provide any of that, other than the statement "It ran in dev without issues, tests passed and I see different values for order values". Which isn't "good enough" for me as a reviewer. 
+
+2. The Judgment 
+
+Someone has to decide what counted as proof than an AI assisted/written PR actually implemeted the right thing. Copilot/Claude could write the code and generate a test suite that passed, but Copilot doesn't know if those tests padded based on business requirements or describe what the actual code already did. 
+This was also an issue the contributor couldn't answer either, because they themselves generated this code without forthought and didn't implement the change themselve. 
+So the fork in the road was: Does the reviewer approve the code because the PR pipelines all passed, or sit on it until the contribuotr can resolve any comments left on the review?
+
+That's the judement call we're facing because it's incredibly hard to measure it. The PR "passed" test coverages, the build "passed" all the pipeline steps, so in theory the code would work in compile time. 
+Sandbagging the approval until the contributor either changes the code so they understand it or resolve all comments causes the business money(slower merges, features taking longer to implement, slower releases) and it compounds because we're essentially pushing against a org mandate. 
+
+But then the cost of cowboy coding AI code is also seen later on - Edge cases coming up, data validation failing, a codebase no one understands, etc.
+
+The difficulty  is invisiblity
+
+Brooks says software's structure only exists in the heads of the people who understand it.
+
+AI written code and AI written tests created a system whose actual state (regardless of it meeting business requirements), passed tests, the pipeline, and compile time builds. 
+
+Changeability is the secondary one.
+
+-The AI optimized for the PR in front of it and had no way to price in what future changes will cost for other ICs doen the road, especially with lack of documentation and PR/commit details. 
+
+3. The Outcome and the Lesson 
+
+For this situtation (my example) I stood by my review until the IC provided screenshots, logs and proof that the dev data was correct. This meant waiting a week longer needed for release, which the business wasn't happy about. However at the end, logs and data validation showed that several orders had incorrect values when confirming it with other domain teams in the org. We reworked the PR to catch these edge cases and built new unit tests as well. The PR descr, the commit details, and an RCCM was made to document all the changes and what was broken and now fixed for easing future maintenance. The good thing though was the AI generated code created the majority of the pumbing and typing so that didn't had to change. We just needed to add more validation functions for different API calls. 
+
+The Lesson: This AI driven PR took an week longer than needed, but overall would have taken much longer to write by hand. The only major tension and downside was edge cases based on business specs and ensuring that the code and PR was udnerstood by everyone before merging in. 

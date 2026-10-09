@@ -1,0 +1,176 @@
+Discussion Post: Expiring Approved Luminis Price Mods - Work Example
+
+What I did:
+
+At work I wrote a T-SQL script against our SQL Server database to expire every approved Luminis price modification. (Luminis Lighting is one of our brands; we needed to perform a price change due to tariffs.)
+
+The main data source was the X.MOD_HEADER table (one row per price mod), but the script also pulled from X.MOD_ANSWER_OPTIONS, X.MOD_QUESTIONS, X.RFA_ANSWER_OPTIONS, and X.RFA_QUESTIONS to confirm that the hard-coded IDs (30 = Approved, 36 = Expired Pricing, 634 = Luminis) actually meant what I assumed.
+
+The output I needed was an updated MOD_HEADER table where the qualifying rows had a new good-thru date and status and then a report listing exactly the rows that were changed.
+
+------------------------------------------------------------------------------------------------------------------
+The script combined different operations:
+
+Selection: The UPDATE's WHERE clause selects only the qualifying rows from MOD_HEADER:
+
+WHERE APPROVED_PRICE IS NOT NULL
+  AND PRODUCT_ANSWER_OPTION_ID = 634
+  AND STATUS_ANSWER_ID = 30
+
+Join (inner): The pre-checks join ANSWER_OPTIONS to QUESTIONS on QUESTION_ID to validate each ID against its category. The final report is an inner join between MOD_HEADER and the @UpdatedRows table variable on MOD_HEADER_ID.
+
+Join (left): The post-update verification is a LEFT JOIN from @UpdatedRows to MOD_HEADER.
+
+Projection: The final SELECT projects nine columns from the joined result.
+-----------------------------------------------------------------------------------------------------------
+Accounting for unmatched rows.
+
+The left join in the verification step is the most important imo.
+
+ @UpdatedRows (the OUTPUT of the UPDATE) is the left side so every ID I updated is preserved.
+ 
+  If any ID had no matching MOD_HEADER row, that row would appear with NULLs, and my WHERE MH.MOD_HEADER_ID IS NULL test would catch it and throw error 50006, rolling back the transaction.
+  
+  Had I used an inner join, an unmatched ID would have dissapeard from the check and the verification would have passed silently which basically nullifies the safety check. The task required a left join here and that is what I used.
+
+The final report however is correctly an inner join. I only want rows that exist in both MOD_HEADER and @UpdatedRows. Any MOD_HEADER rows that were not updated are unmatched and intentionally dropped.
+
+Was the result correct?
+
+ Yes. The verification passed, the row count of the final report matched the count in @UpdatedRows, and a follow-up query returned zero rows afterward which was expected.
+
+Follow Up Query -
+---
+SELECT COUNT(*)
+FROM MOD_HEADER
+WHERE STATUS_ANSWER_ID = 30
+  AND PRODUCT_ANSWER_OPTION_ID = 634
+  AND APPROVED_PRICE IS NOT NULL;   -- returned 0
+---
+
+
+--------------------------------------------------------------------------------------------------------------
+Scrubbed SQL Example of the Query Performed
+(Schema, table/column names, and ID values below have been genericized but the logic is unchanged.)
+
+/*
+    Expires all Approved price modifications for a given product line.
+    For every PRICING.MOD_HEADER row that is an Approved mod for the target
+    product with an approved price, this sets the good-thru date to a fixed
+    cutoff and changes the status to Expired Pricing.
+    Runs in a single transaction with pre-checks that validate the lookup IDs,
+    post-update verification of every affected row, and rollback on any
+    failure, then returns the updated rows.
+*/
+USE [ExampleDB];
+GO
+
+SET NOCOUNT ON;
+SET XACT_ABORT ON;
+
+DECLARE @ApprovedStatusId       int = 10;   -- lookup ID for "Approved"
+DECLARE @ExpiredStatusId        int = 20;   -- lookup ID for "Expired Pricing"
+DECLARE @TargetProductOptionId  int = 100;  -- lookup ID for the target product line
+DECLARE @TargetGoodThruDateUtc  datetime2(7) = CONVERT(datetime2(7), '20260101', 112);
+DECLARE @UpdatedRows table (MOD_HEADER_ID int PRIMARY KEY);
+
+IF DB_NAME() <> N'ExampleDB'
+    THROW 50000, 'This script must run in the ExampleDB database.', 1;
+
+------------------------------------------------------------------------
+-- Pre-checks: confirm each hard-coded ID means what we think it means.
+-- Each check is an INNER JOIN between the lookup values and their categories.
+------------------------------------------------------------------------
+IF NOT EXISTS (
+    SELECT 1
+    FROM PRICING.MOD_LOOKUP_VALUES AS LV
+    INNER JOIN PRICING.MOD_LOOKUP_CATEGORIES AS LC ON LC.CATEGORY_ID = LV.CATEGORY_ID
+    WHERE LV.LOOKUP_ID    = @ApprovedStatusId
+      AND LV.SHORT_CODE   = 'APP'
+      AND LV.DISPLAY_TEXT = 'Approved'
+      AND LC.CATEGORY_NAME = 'MOD_STATUS'
+)
+    THROW 50001, 'Approved status ID does not match the MOD_STATUS lookup in this database.', 1;
+
+IF NOT EXISTS (
+    SELECT 1
+    FROM PRICING.PRODUCT_LOOKUP_VALUES AS LV
+    INNER JOIN PRICING.PRODUCT_LOOKUP_CATEGORIES AS LC ON LC.CATEGORY_ID = LV.CATEGORY_ID
+    WHERE LV.LOOKUP_ID    = @TargetProductOptionId
+      AND LV.SHORT_CODE   = 'PRODX'
+      AND LV.DISPLAY_TEXT = 'Product X'
+      AND LC.CATEGORY_NAME = 'PRODUCT_LINE'
+)
+    THROW 50002, 'Product option ID does not match the PRODUCT_LINE lookup in this database.', 1;
+
+IF NOT EXISTS (
+    SELECT 1
+    FROM PRICING.MOD_LOOKUP_VALUES AS LV
+    INNER JOIN PRICING.MOD_LOOKUP_CATEGORIES AS LC ON LC.CATEGORY_ID = LV.CATEGORY_ID
+    WHERE LV.LOOKUP_ID    = @ExpiredStatusId
+      AND LV.SHORT_CODE   = 'EXP'
+      AND LV.DISPLAY_TEXT = 'Expired Pricing'
+      AND LC.CATEGORY_NAME = 'MOD_STATUS'
+)
+    THROW 50003, 'Expired status ID does not match the MOD_STATUS lookup in this database.', 1;
+
+IF EXISTS (SELECT 1 FROM sys.databases WHERE name = DB_NAME() AND is_recursive_triggers_on = 1)
+    THROW 50004, 'Recursive triggers must be disabled for the verified revision behavior.', 1;
+
+BEGIN TRY
+    BEGIN TRANSACTION;
+
+    --------------------------------------------------------------------
+    -- Selection: only Approved mods for the target product with a price.
+    --------------------------------------------------------------------
+    UPDATE MH
+    SET MH.GOOD_THRU_DATE_UTC = @TargetGoodThruDateUtc,
+        MH.STATUS_ID          = @ExpiredStatusId
+    OUTPUT inserted.MOD_HEADER_ID INTO @UpdatedRows (MOD_HEADER_ID)
+    FROM PRICING.MOD_HEADER AS MH WITH (UPDLOCK, HOLDLOCK)
+    WHERE MH.APPROVED_PRICE IS NOT NULL
+      AND MH.PRODUCT_OPTION_ID = @TargetProductOptionId
+      AND MH.STATUS_ID         = @ApprovedStatusId;
+
+    IF NOT EXISTS (SELECT 1 FROM @UpdatedRows)
+        THROW 50005, 'No Approved MOD_HEADER rows with an approved price were found for the target product.', 1;
+
+    --------------------------------------------------------------------
+    -- Verification: LEFT JOIN so unmatched IDs surface as NULLs and fail.
+    --------------------------------------------------------------------
+    IF EXISTS (
+        SELECT 1
+        FROM @UpdatedRows AS U
+        LEFT JOIN PRICING.MOD_HEADER AS MH ON MH.MOD_HEADER_ID = U.MOD_HEADER_ID
+        WHERE MH.MOD_HEADER_ID IS NULL
+           OR MH.GOOD_THRU_DATE_UTC IS NULL
+           OR MH.GOOD_THRU_DATE_UTC <> @TargetGoodThruDateUtc
+           OR MH.STATUS_ID IS NULL
+           OR MH.STATUS_ID <> @ExpiredStatusId
+    )
+        THROW 50006, 'Post-update verification failed; the transaction was rolled back.', 1;
+
+    COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF @@TRANCOUNT > 0
+        ROLLBACK TRANSACTION;
+    THROW;
+END CATCH;
+
+------------------------------------------------------------------------
+-- Report: INNER JOIN + projection of the rows that were changed.
+------------------------------------------------------------------------
+SELECT MH.MOD_HEADER_ID,
+       MH.MOD_NUMBER,
+       MH.REQUEST_ID,
+       MH.PRODUCT_OPTION_ID,
+       MH.STATUS_ID,
+       MH.GOOD_THRU_DATE_UTC,
+       MH.LAST_UPDATED_BY,
+       MH.LAST_UPDATE_UTC,
+       MH.REVISION_ID
+FROM PRICING.MOD_HEADER AS MH
+INNER JOIN @UpdatedRows AS U ON U.MOD_HEADER_ID = MH.MOD_HEADER_ID
+ORDER BY MH.MOD_HEADER_ID;
+GO
